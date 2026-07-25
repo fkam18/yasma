@@ -1,0 +1,90 @@
+import toml
+from pathlib import Path
+import requests
+from requests.auth import HTTPBasicAuth
+from PIL import Image
+from io import BytesIO
+import sys
+
+DEFAULT_CONFIG_PATH = "/app/secrets/wp_post.toml"
+
+def _load_config():
+    """Load WordPress credentials from a TOML file."""
+    config_path = Path(DEFAULT_CONFIG_PATH)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing secrets file: {config_path}")
+    cfg = toml.load(config_path)
+    wp = cfg.get("wordpress", {})
+    if not all(k in wp for k in ("url", "username", "password")):
+        raise ValueError("Secrets file must contain [wordpress] with url, username, password")
+    return wp
+
+def _upload_media(wp_url, auth, image_path):
+    with Image.open(image_path) as img:
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P'):
+            img = img.convert('RGB')
+        buf = BytesIO()
+        img.save(buf, format='JPEG', quality=85, optimize=True)
+        img_bytes = buf.getvalue()
+    filename = Path(image_path).name
+    files = {'file': (filename, img_bytes, 'image/jpeg')}
+    resp = requests.post(f"{wp_url}/wp-json/wp/v2/media", files=files, auth=auth)
+    if resp.status_code not in (200, 201):
+        raise Exception(f"Media upload failed: {resp.status_code} - {resp.text}")
+    data = resp.json()
+    return data['id'], data['guid']['rendered']
+
+def _get_category_ids(wp_url, auth, names):
+    if not names:
+        return []
+    ids = []
+    endpoint = f"{wp_url}/wp-json/wp/v2/categories"
+    for name in names:
+        resp = requests.get(endpoint, params={'search': name, 'per_page': 10}, auth=auth)
+        if resp.status_code == 200:
+            for cat in resp.json():
+                if cat['name'].lower() == name.lower():
+                    ids.append(cat['id'])
+                    break
+    return ids
+
+def post(data: dict) -> dict:
+    try:
+        wp = _load_config()
+        wp_url = wp['url'].rstrip('/')
+        auth = HTTPBasicAuth(wp['username'], wp['password'])
+    except Exception as e:
+        return {"status": "fail", "reason": f"Secrets error: {e}"}
+
+    title = data.get("title", "Untitled")
+    story = data.get("story", "")
+    image_paths = data.get("image_paths", [])
+    categories = data.get("categories", [])
+
+    if not image_paths:
+        return {"status": "fail", "reason": "No image"}
+
+    try:
+        media_id, media_url = _upload_media(wp_url, auth, image_paths[0])
+        cat_ids = _get_category_ids(wp_url, auth, categories)
+
+        content = f"<p>{story}</p>"
+        if media_url:
+            content += f'\n<p><img src="{media_url}" alt="Post image" /></p>'
+
+        resp = requests.post(
+            f"{wp_url}/wp-json/wp/v2/posts",
+            json={
+                "title": title,
+                "content": content,
+                "status": "publish",
+                "featured_media": media_id,
+                "categories": cat_ids
+            },
+            auth=auth
+        )
+        if resp.status_code not in (200, 201):
+            return {"status": "fail", "reason": f"Post creation failed: {resp.status_code} - {resp.text}"}
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "fail", "reason": str(e)}

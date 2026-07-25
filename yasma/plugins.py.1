@@ -1,0 +1,28 @@
+import importlib
+import sys
+from pathlib import Path
+from typing import Dict
+
+class PluginManager:
+    def __init__(self, plugin_map: Dict[str, str]):
+        # plugin_map: {"wordpress": "wp_post.py"}
+        self.plugins = plugin_map
+        self.plugin_dir = Path("/app/plugins")  # fixed location inside container
+
+    def run_plugin(self, name: str, data: dict) -> str:
+        if name not in self.plugins:
+            return "fail: unknown plugin"
+        module_name = Path(self.plugins[name]).stem  # e.g., wp_post
+        try:
+            # Load module from plugins directory
+            sys.path.insert(0, str(self.plugin_dir))
+            mod = importlib.import_module(module_name)
+            sys.path.pop(0)
+            # Call post function
+            result = mod.post(data)
+            if result["status"] == "success":
+                return "success"
+            else:
+                return f"fail: {result.get('reason', 'unknown')}"
+        except Exception as e:
+            return f"fail: {str(e)}"

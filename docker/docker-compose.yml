@@ -1,0 +1,19 @@
+services:
+  yasma:
+    image: yasma:latest
+    container_name: yasma
+    restart: unless-stopped
+    dns:
+      - 192.168.0.15          # ← custom DNS for name‑based virtual hosts
+    ports:
+      - "3333:3333"
+    volumes:
+      - /home/master/yasma/config.toml:/app/config.toml:ro
+      - /home/master/yasma/secrets:/app/secrets:ro
+      - yasma_data:/data/jobs
+    environment:
+      - YASMA_CONFIG=/app/config.toml
+      - PYTHONDONTWRITEBYTECODE=1
+
+volumes:
+  yasma_data:

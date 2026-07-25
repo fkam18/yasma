@@ -1,0 +1,41 @@
+- hosts: app
+  vars:
+    target_base: "/home/master/yasma"
+    project_root: "{{ playbook_dir }}/.."   # go up from ansible/ to project root
+  tasks:
+    - name: Ensure target directories exist
+      file:
+        path: "{{ target_base }}/{{ item }}"
+        state: directory
+      loop:
+        - ""
+        - secrets
+
+    - name: Copy Docker image archive
+      copy:
+        src: "{{ project_root }}/docker/yasma.tar.gz"
+        dest: "{{ target_base }}/yasma.tar.gz"
+
+    - name: Load Docker image
+      command: "docker load -i {{ target_base }}/yasma.tar.gz"
+
+    - name: Copy docker-compose.yml
+      copy:
+        src: "{{ project_root }}/docker/docker-compose.yml"
+        dest: "{{ target_base }}/docker-compose.yml"
+
+    - name: Copy config.toml
+      copy:
+        src: "{{ project_root }}/config.toml"
+        dest: "{{ target_base }}/config.toml"
+
+    - name: Copy secrets folder
+      copy:
+        src: "{{ project_root }}/secrets/"
+        dest: "{{ target_base }}/secrets/"
+
+    - name: Restart YASMA container
+      command: docker compose up -d
+      args:
+        chdir: "{{ target_base }}"
+

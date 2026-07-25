@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YASMA – Social Media Assistant</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body { padding: 20px; }
+  .job-card { margin-bottom: 1rem; }
+  .job-img { max-width: 100px; margin: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1 class="mb-4">YASMA – Yet Another Social Media Assistant</h1>
+
+  <!-- Tabs -->
+  <ul class="nav nav-tabs" id="mainTab" role="tablist">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#jobs">Jobs</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#create">Create Job</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#log">Log</a></li>
+  </ul>
+
+  <div class="tab-content mt-3">
+    <!-- Jobs List Tab -->
+    <div class="tab-pane fade show active" id="jobs">
+      <div class="d-flex justify-content-between mb-2">
+        <button class="btn btn-primary" onclick="processAll()">Process All Now</button>
+        <button class="btn btn-danger" onclick="deleteMarked()">Delete All Marked</button>
+      </div>
+      <div id="jobList"></div>
+    </div>
+
+    <!-- Create Job Tab -->
+    <div class="tab-pane fade" id="create">
+      <form id="createForm" enctype="multipart/form-data">
+        <div class="mb-3">
+          <label>Images (JPEG, multiple)</label>
+          <input type="file" class="form-control" name="images" multiple accept="image/jpeg">
+        </div>
+        <div class="mb-3">
+          <label>Title</label>
+          <input type="text" class="form-control" name="title">
+        </div>
+        <div class="mb-3">
+          <label>Vibe</label>
+          <input type="text" class="form-control" name="vibe" placeholder="documentary, funny, ...">
+        </div>
+        <div class="mb-3">
+          <label>Hints</label>
+          <textarea class="form-control" name="hints" rows="2"></textarea>
+        </div>
+        <div class="row">
+          <div class="col">
+            <label>Categories</label>
+            <select class="form-select" name="categories" multiple id="categoriesSelect" size="5">
+              <!-- options will be populated by JavaScript -->
+            </select>
+          </div>
+          <div class="col">
+            <label>Length</label>
+            <select class="form-select" name="length">
+              <option value="short">Short</option>
+              <option value="long">Long</option>
+            </select>
+          </div>
+        </div>
+        <div class="mb-3 form-check">
+          <input type="checkbox" class="form-check-input" name="use_exif" checked>
+          <label class="form-check-label">Use EXIF data</label>
+        </div>
+        <button type="submit" class="btn btn-success">Create Job</button>
+      </form>
+    </div>
+
+    <!-- Log Tab -->
+    <div class="tab-pane fade" id="log">
+      <button class="btn btn-warning mb-2" onclick="clearLog()">Erase Log</button>
+      <pre id="logContent" style="max-height:400px; overflow-y:auto;"></pre>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal fade" id="settingsModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5>Settings</h5></div>
+        <div class="modal-body">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="autoApproveCheck">
+            <label class="form-check-label">Auto‑approve (post immediately after LLM)</label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" onclick="saveSettings()">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn btn-secondary position-fixed bottom-0 end-0 m-3" data-bs-toggle="modal" data-bs-target="#settingsModal">⚙️ Settings</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ---------- Globals ----------
+let settings = {};
+let plugins = [];
+
+// ---------- Startup ----------
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadSettings();
+  await loadJobs();
+  // 🔁 Auto‑refresh the job list every 5 seconds
+  setInterval(loadJobs, 5000);
+  // Pre-fill form defaults
+  document.querySelector('[name=vibe]').value = settings.defaults?.vibe || '';
+  document.querySelector('[name=length]').value = settings.defaults?.length || 'short';
+  document.querySelector('[name=use_exif]').checked = settings.defaults?.use_exif !== false;
+  // Load log when tab clicked
+  document.querySelector('a[href="#log"]').addEventListener('click', loadLog);
+  // Form submit
+  document.getElementById('createForm').addEventListener('submit', createJob);
+});
+
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  settings = await res.json();
+  document.getElementById('autoApproveCheck').checked = settings.auto_approve;
+  plugins = settings.plugins || [];
+  // Prefill form fields
+  document.querySelector('[name=title]').value = settings.defaults?.title || '';
+  document.querySelector('[name=vibe]').value = settings.defaults?.vibe || '';
+  document.querySelector('[name=hints]').value = settings.defaults?.hints || '';
+  document.querySelector('[name=length]').value = settings.defaults?.length || 'short';
+  document.querySelector('[name=use_exif]').checked = settings.defaults?.use_exif !== false;
+
+  // --- Build categories dropdown ---
+  const select = document.getElementById('categoriesSelect');
+  const allowed = settings.allowed_categories || [];
+  const defaultCats = settings.defaults?.categories || [];
+  
+  select.innerHTML = ''; // clear any existing options
+  
+  allowed.forEach(cat => {
+    const option = document.createElement('option');
+    option.value = cat;
+    option.textContent = cat;
+    // Select if it's in the defaults list
+    if (defaultCats.includes(cat)) {
+      option.selected = true;
+    }
+    select.appendChild(option);
+  });
+  // Fetch plugin list (hardcoded? we need an endpoint or read from settings)
+  // We'll add an endpoint later; for now we hardcode from config that we can get via /api/jobs/...? Better: add /api/plugins.
+  // Temporary: we'll get plugins from the first job that has them? Not ideal.
+  // We'll assume a dedicated endpoint not yet defined. For now, we'll simulate: fetch /api/settings could include plugins.
+  // I'll extend the settings response to include plugins list.
+  // Let's modify backend to include plugins in settings response. For brevity, I'll add that.
+}
+
+async function loadJobs() {
+  const res = await fetch('/api/jobs');
+  const data = await res.json();
+  const list = document.getElementById('jobList');
+  list.innerHTML = '';
+  data.jobs.forEach(job => {
+    const card = document.createElement('div');
+    card.className = 'card job-card';
+    card.innerHTML = `
+      <div class="card-body">
+        <div class="d-flex justify-content-between">
+          <h5>#${job.id} – ${job.title || 'Untitled'} <span class="badge bg-${statusColor(job.status)}">${job.status}</span></h5>
+          <div>
+            <input type="checkbox" class="form-check-input mark-delete" data-id="${job.id}" ${job.marked ? 'checked' : ''} onchange="toggleMark(${job.id}, this.checked)">
+          </div>
+        </div>
+        <p>${job.story || '(no story yet)'}</p>
+        <div>
+          ${job.images.map(img => `<img src="/api/jobs/${job.id}/images/${img}" class="job-img">`).join('')}
+        </div>
+        <div class="mt-2">
+          ${job.status === 'processed' ? `
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              ${plugins.map(p => `
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input plugin-check" type="checkbox" value="${p}" id="plug_${job.id}_${p}" 
+                    ${settings.defaults?.post_plugins?.includes(p) ? 'checked' : ''}>
+                  <label class="form-check-label" for="plug_${job.id}_${p}">${p}</label>
+                </div>
+              `).join('')}
+              <button class="btn btn-sm btn-primary" onclick="postJobNow(${job.id})">Post</button>
+            </div>
+          ` : ''}
+        </div>
+      </div>`;
+    list.appendChild(card);
+  });
+}
+
+function statusColor(status) {
+  const map = {
+    pending: 'warning',
+    processing: 'info',      // new
+    processed: 'success',
+    error: 'danger',
+    posted: 'secondary'
+  };
+  return map[status] || 'secondary';
+}
+
+async function toggleMark(id, val) {
+  await fetch(`/api/jobs/${id}/mark`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({marked: val})
+  });
+}
+
+async function deleteMarked() {
+  await fetch('/api/jobs/delete-marked', {method: 'POST'});
+  loadJobs();
+}
+
+async function processAll() {
+  const btn = document.querySelector('#jobs button.btn-primary');
+  if (!btn) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Processing...';
+
+  try {
+    const res = await fetch('/api/process', { method: 'POST' });
+    if (!res.ok) throw new Error('Server error');
+    const data = await res.json();
+    // Show the response message (e.g., "Processing started" or "No pending jobs")
+    alert(data.message || 'Done');
+  } catch(e) {
+    alert('Processing failed. Check the log for details.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Process All Now';
+    loadJobs();   // refresh the list to show updated statuses
+  }
+}
+
+async function loadLog() {
+  const res = await fetch('/api/log?lines=100');
+  const data = await res.json();
+  document.getElementById('logContent').textContent = data.log.join('\n');
+}
+
+async function clearLog() {
+  await fetch('/api/log', {method: 'DELETE'});
+  loadLog();
+}
+
+async function createJob(e) {
+  e.preventDefault();
+  const form = e.target;
+  const formData = new FormData(form);
+  // Append images
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    body: formData
+  });
+  if (res.ok) {
+    alert('Job created');
+    loadJobs();
+    // Switch to jobs tab
+    bootstrap.Tab.getInstance(document.querySelector('#mainTab a[href="#jobs"]')).show();
+  } else {
+    alert('Error creating job');
+  }
+}
+
+async function saveSettings() {
+  const auto = document.getElementById('autoApproveCheck').checked;
+  await fetch('/api/settings', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_approve: auto})
+  });
+  alert('Settings saved');
+}
+
+async function postJobNow(jobId) {
+  const checks = document.querySelectorAll(`.plugin-check[id^="plug_${jobId}_"]:checked`);
+  const selected = [...checks].map(el => el.value);
+  if (selected.length === 0) {
+    alert('Please select at least one plugin.');
+    return;
+  }
+  const btn = document.querySelector(`.job-card button[onclick="postJobNow(${jobId})"]`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Posting...';
+  }
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/post`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({plugins: selected})
+    });
+    const data = await res.json();
+    alert(JSON.stringify(data.results));
+  } catch(e) {
+    alert('Posting failed.');
+  }
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Post';
+  }
+  loadJobs(); // refresh list
+}
+
+// Need to get plugins list. Add a /api/plugins endpoint to backend.
+// Quick fix: add to settings response.
+</script>
+</body>
+</html>

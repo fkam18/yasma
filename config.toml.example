@@ -1,0 +1,22 @@
+processing_times = ["10:00", "15:00", "22:00"]
+
+[yapo]
+url = "http://localhost:3388"
+api_token = "your-token-here"
+default_model = "yasma"
+
+job_queue_root = "/data/jobs"
+auto_approve = false
+
+[defaults]
+vibe = "documentary"
+categories = ["general"]
+length = "short"
+use_exif = true
+model = "yasma"
+
+categories = ["general", "food", "travel", "event", "nature", "tech"]
+
+[plugins.wordpress]
+script = "wp_post.py"
+config = "/app/secrets/wp_post.toml"   # path inside container
