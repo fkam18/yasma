@@ -2,6 +2,9 @@
 
 AI-powered social media post generator that turns your photos into ready‑to‑publish stories, using a self‑hosted LLM backend (YAPO). Deploy it at home, review, tweak, and post to multiple platforms with one click.
 
+YAPO is at https://www.github.com/fkam18/yapo.git
+YAPO helps us use home hosted GPU for AI works rather than burning tokens.
+
 ## Features
 
 - **Visual AI Storyteller** – Combine 1–N photos with a title, vibe, hints, and EXIF data to generate engaging social media posts via YAPO.
