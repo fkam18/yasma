@@ -7,6 +7,8 @@ from io import BytesIO
 
 DEFAULT_CONFIG_PATH = "/app/secrets/wp_post.toml"
 
+_category_cache = {}
+
 def _log(msg):
     """Write debug info to stderr so it appears in docker logs."""
     print(f"[wp_post] {msg}", file=sys.stderr, flush=True)
@@ -61,17 +63,52 @@ def _upload_media(wp_url, auth, image_input, filename_hint="image.jpg"):
     return data['id'], data['guid']['rendered']
 
 def _get_category_ids(wp_url, auth, names):
+    """Resolve category names to IDs (fetch all once, auto‑create missing).
+    Correctly uses /wp-json/ base path."""
+    global _category_cache
     if not names:
         return []
+
+    # 1. Fetch all categories once and cache them
+    if not _category_cache:
+        base = f"{wp_url.rstrip('/')}/wp-json/wp/v2/categories"
+        params = {'per_page': 100, 'page': 1}
+        while True:
+            try:
+                resp = requests.get(base, auth=auth, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                _log(f"Category fetch failed: {e}")
+                break
+            for cat in data:
+                _category_cache[cat['name'].strip().lower()] = cat['id']
+            if 'next' not in resp.links:
+                break
+            base = resp.links['next']['url']   # follow pagination
+        _log(f"Loaded {len(_category_cache)} categories")
+
+    # 2. Resolve each requested name
     ids = []
-    endpoint = f"{wp_url}/wp-json/wp/v2/categories"
     for name in names:
-        resp = requests.get(endpoint, params={'search': name, 'per_page': 10}, auth=auth)
-        if resp.status_code == 200:
-            for cat in resp.json():
-                if cat['name'].lower() == name.lower():
-                    ids.append(cat['id'])
-                    break
+        key = name.strip().lower()
+        if key in _category_cache:
+            ids.append(_category_cache[key])
+        else:
+            # 3. Auto‑create missing category
+            _log(f"Category '{name}' not found – creating...")
+            create_url = f"{wp_url.rstrip('/')}/wp-json/wp/v2/categories"
+            try:
+                create_resp = requests.post(create_url, json={"name": name}, auth=auth)
+                if create_resp.status_code == 201:
+                    new_id = create_resp.json()['id']
+                    _category_cache[key] = new_id
+                    ids.append(new_id)
+                    _log(f"Created category '{name}' with ID {new_id}")
+                else:
+                    _log(f"Failed to create category '{name}': {create_resp.status_code}")
+            except Exception as e:
+                _log(f"Error creating category '{name}': {e}")
     return ids
 
 def post(data: dict) -> dict:
