@@ -1,4 +1,5 @@
 import requests
+import re
 import time
 import base64
 import mimetypes
@@ -37,10 +38,19 @@ class YapoClient:
         try:
             data = json.loads(raw_output)
             if isinstance(data, dict) and "content" in data:
-                return data["content"].strip()
-            return raw_output.strip()
+                text = data["content"].strip()
+            else:
+                text = raw_output.strip()
         except (json.JSONDecodeError, TypeError):
-            return raw_output.strip()
+            text = raw_output.strip()
+
+        if not text:
+            return None
+
+        # Remove everything up to the last </think> tag (inclusive)
+        cleaned = re.sub(r'^.*</think>\s*', '', text, flags=re.DOTALL)
+
+        return cleaned.strip()
 
     def submit_and_wait(self, prompt, model, attachments=None, job_name="yasma-job", timeout=300) -> Optional[str]:
         encoded_attachments = self._encode_attachments(attachments or [])

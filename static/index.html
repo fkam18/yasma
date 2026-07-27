@@ -113,8 +113,21 @@ let plugins = [];
 document.addEventListener("DOMContentLoaded", async () => {
   await loadSettings();
   await loadJobs();
-  // 🔁 Auto‑refresh the job list every 5 seconds
-  setInterval(loadJobs, 5000);
+  //  initiate SSE event to pick up auto refresh notification
+  const evtSource = new EventSource("/api/events");
+  evtSource.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "jobs_changed") {
+        loadJobs();
+      }
+    } catch(e) {
+      console.error("SSE error:", e);
+    }
+  };
+  evtSource.onerror = (e) => {
+    console.error("EventSource failed, will retry automatically...");
+  };
   // Pre-fill form defaults
   document.querySelector('[name=vibe]').value = settings.defaults?.vibe || '';
   document.querySelector('[name=length]').value = settings.defaults?.length || 'short';

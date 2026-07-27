@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import List
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -17,6 +17,9 @@ from .jobs import JobManager
 from .yapo import YapoClient
 from .plugins import PluginManager
 from .log import LogManager
+from yasma.events import EventManager
+
+event_manager = EventManager()
 
 app = FastAPI(title="YASMA")
 config = load_config()
@@ -36,6 +39,35 @@ if static_dir.exists():
 
 # ---------- API Endpoints ----------
 
+from fastapi.responses import StreamingResponse
+
+@app.get("/api/events")
+async def sse_events(request: Request):
+    client_id, queue = await event_manager.subscribe()
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    # Send a keep-alive comment to prevent proxy timeouts
+                    yield ": keepalive\nretry: 2000\n\n"   # reconnect after 2 seconds
+        finally:
+            event_manager.unsubscribe(client_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # for nginx if used
+        }
+    )
+
 @app.get("/api/jobs", response_model=JobList)
 def list_jobs():
     return {"jobs": job_manager.list_jobs()}
@@ -51,66 +83,77 @@ async def process_all(background_tasks: BackgroundTasks):
     for job in pending_jobs:
         job_manager.set_status(job.id, "processing")
 
+    # Capture the running event loop NOW (in the main async thread)
+    loop = asyncio.get_event_loop()
+
     def run_processing():
-        for job in pending_jobs:
-            try:
-                # EXIF
-                exif_data = ""
-                if job.use_exif and job.images:
-                    img_path = job_manager.get_image_path(job.id, job.images[0])
-                    if img_path and img_path.exists():
-                        from .exif import extract_exif
-                        exif_data = extract_exif(img_path)
+        try:
+            for job in pending_jobs:
+                try:
+                    # EXIF
+                    exif_data = ""
+                    if job.use_exif and job.images:
+                        img_path = job_manager.get_image_path(job.id, job.images[0])
+                        if img_path and img_path.exists():
+                            from .exif import extract_exif
+                            exif_data = extract_exif(img_path)
 
-                user_prompt = (
-                    f"Title: {job.title}\n"
-                    f"Vibe: {job.vibe}\n"
-                    f"Hints: {job.hints}\n"
-                    f"Categories: {', '.join(job.categories)}\n"
-                    f"Post Length: {job.length}\n"
-                    f"EXIF Data: {exif_data if exif_data else '(none)'}\n\n"
-                    f"You may use web search to find interesting facts about the photos if you think it will enrich the post."
-                )
+                    user_prompt = (
+                        f"Title: {job.title}\n"
+                        f"Vibe: {job.vibe}\n"
+                        f"Hints: {job.hints}\n"
+                        f"Categories: {', '.join(job.categories)}\n"
+                        f"Post Length: {job.length}\n"
+                        f"EXIF Data: {exif_data if exif_data else '(none)'}\n\n"
+                        f"You may use web search to find interesting facts about the photos if you think it will enrich the post."
+                    )
 
-                attachments = [str(job_manager.get_image_path(job.id, img)) for img in job.images]
+                    attachments = [str(job_manager.get_image_path(job.id, img)) for img in job.images]
 
-                story = yapo_client.submit_and_wait(
-                    prompt=user_prompt,
-                    model=job.model,
-                    attachments=attachments,
-                    job_name=f"yasma-{job.id}",
-                    timeout=300
-                )
+                    story = yapo_client.submit_and_wait(
+                        prompt=user_prompt,
+                        model=job.model,
+                        attachments=attachments,
+                        job_name=f"yasma-{job.id}",
+                        timeout=300
+                    )
 
-                if story:
-                    job_manager.save_story(job.id, story)
-                    job_manager.set_status(job.id, "processed")
-                    if config.auto_approve:
-                        all_ok = True
-                        for pname in config.plugins:
-                            data = {
-                                "title": job.title,
-                                "story": story,
-                                "image_paths": [str(job_manager.get_image_path(job.id, img)) for img in job.images],
-                                "categories": job.categories
-                            }
-                            try:
-                                res = plugin_manager.run_plugin(pname, data)
-                                if res != "success":
+                    if story:
+                        job_manager.save_story(job.id, story)
+                        job_manager.set_status(job.id, "processed")
+                        if config.auto_approve:
+                            all_ok = True
+                            for pname in config.plugins:
+                                data = {
+                                    "title": job.title,
+                                    "story": story,
+                                    "image_paths": [str(job_manager.get_image_path(job.id, img)) for img in job.images],
+                                    "categories": job.categories
+                                }
+                                try:
+                                    res = plugin_manager.run_plugin(pname, data)
+                                    if res != "success":
+                                        all_ok = False
+                                except Exception:
                                     all_ok = False
-                            except Exception:
-                                all_ok = False
-                        if all_ok:
-                            job_manager.remove_job(job.id)
-                            log_manager.log_post(job.id, job.title)
-                else:
-                    job_manager.set_status(job.id, "pending")  # revert so it can retry
-                    log_manager.log_error(job.id, "LLM timeout/failure")
-            except Exception as e:
-                job_manager.set_status(job.id, "pending")
-                log_manager.log_error(job.id, str(e))
+                            if all_ok:
+                                job_manager.remove_job(job.id)
+                                log_manager.log_post(job.id, job.title)
+                    else:
+                        job_manager.set_status(job.id, "pending")
+                        log_manager.log_error(job.id, "LLM timeout/failure")
+                except Exception as e:
+                    job_manager.set_status(job.id, "pending")
+                    log_manager.log_error(job.id, str(e))
+        finally:
+            # Always notify the frontend when processing finishes (success or fail)
+            asyncio.run_coroutine_threadsafe(
+                event_manager.publish({"type": "jobs_changed"}),
+                loop
+            )
 
     background_tasks.add_task(run_processing)
+    await event_manager.publish({"type": "jobs_changed"})
     return {"message": "Processing started"}
 
 @app.post("/api/jobs", response_model=JobResponse, status_code=201)
@@ -125,6 +168,7 @@ async def create_job(
     use_exif: bool = Form(config.defaults.use_exif)
 ):
     job = await job_manager.create_job(images, title, vibe, hints, length, categories, model, use_exif)
+    await event_manager.publish({"type": "jobs_changed"})
     return job
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -149,40 +193,50 @@ def mark_job(job_id: int, marked: bool = True):
     return job
 
 @app.post("/api/jobs/delete-marked")
-def delete_marked():
-    deleted = job_manager.delete_marked()
+async def delete_marked():
+    # Run the synchronous job deletion in a thread
+    deleted = await asyncio.to_thread(job_manager.delete_marked)
+    await event_manager.publish({"type": "jobs_changed"})
     return {"deleted": deleted}
 
-@app.put("/api/jobs/{job_id}/post", response_model=PostResponse)
-def post_job(job_id: int, req: PostRequest):
-    job = job_manager.get_job(job_id)
-    if not job or job.status != "processed":
-        raise HTTPException(400, detail="Job not ready")
-    results = {}
-    for pname in req.plugins:
-        if pname not in config.plugins:
-            results[pname] = "fail (unknown plugin)"
-            continue
-        data = {
-            "title": job.title,
-            "story": job.story,
-            "image_paths": [str(job_manager.get_image_path(job_id, img)) for img in job.images],
-            "categories": job.categories
-        }
-        # Temporary debug
-        import sys
-        print(f"[DEBUG post_job] Plugin: {pname}", file=sys.stderr, flush=True)
-        print(f"[DEBUG post_job] Data keys: {list(data.keys())}", file=sys.stderr, flush=True)
-        print(f"[DEBUG post_job] image_paths: {data['image_paths']}", file=sys.stderr, flush=True)
+import asyncio
 
-        try:
-            status = plugin_manager.run_plugin(pname, data)
-            results[pname] = status
-        except Exception as e:
-            results[pname] = f"fail: {e}"
-    if any(v == "success" for v in results.values()):
-        job_manager.remove_job(job_id)
-        log_manager.log_post(job_id, job.title)
+@app.put("/api/jobs/{job_id}/post", response_model=PostResponse)
+async def post_job(job_id: int, req: PostRequest):
+    def do_post():
+        job = job_manager.get_job(job_id)
+        if not job or job.status != "processed":
+            raise HTTPException(400, detail="Job not ready")
+        results = {}
+        for pname in req.plugins:
+            if pname not in config.plugins:
+                results[pname] = "fail (unknown plugin)"
+                continue
+            data = {
+                "title": job.title,
+                "story": job.story,
+                "image_paths": [str(job_manager.get_image_path(job_id, img)) for img in job.images],
+                "categories": job.categories
+            }
+            # Debug prints (okay to keep)
+            import sys
+            print(f"[DEBUG post_job] Plugin: {pname}", file=sys.stderr, flush=True)
+            print(f"[DEBUG post_job] Data keys: {list(data.keys())}", file=sys.stderr, flush=True)
+            print(f"[DEBUG post_job] image_paths: {data['image_paths']}", file=sys.stderr, flush=True)
+
+            try:
+                status = plugin_manager.run_plugin(pname, data)
+                results[pname] = status
+            except Exception as e:
+                results[pname] = f"fail: {e}"
+        if any(v == "success" for v in results.values()):
+            job_manager.remove_job(job_id)
+            log_manager.log_post(job_id, job.title)
+        return results
+
+    # Execute the whole synchronous block in a thread to avoid blocking the async loop
+    results = await asyncio.to_thread(do_post)
+    await event_manager.publish({"type": "jobs_changed"})
     return {"results": results}
 
 @app.get("/api/log", response_model=LogResponse)
